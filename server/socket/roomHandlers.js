@@ -1,6 +1,16 @@
 import { sanitizeTopics } from '../lib/topics.js'
 import { getProfile } from '../services/profiles.js'
 
+// ─────────────────────────────────────────────────────────────
+// IDENTIDAD ESTABLE
+// Cada pestaña tiene un "pid" propio (lo genera el cliente y lo guarda en
+// sessionStorage). Así, si refrescas o el celular corta la conexión al
+// cambiar de app, el server te reconoce y vuelves a tu asiento.
+// Los mensajes privados van al canal "p:<pid>" (no al socket.id).
+// ─────────────────────────────────────────────────────────────
+export const chan  = (pid) => `p:${pid}`
+export const pidOf = (socket) => socket.data.pid ?? socket.id
+
 // Carga las victorias del jugador (para su marco bronce/plata/oro) sin bloquear la entrada
 function loadWins(io, code, player) {
   if (!player.profileId) return
@@ -51,7 +61,8 @@ const cleanProfileId = (id) => (typeof id === 'string' && /^p_[a-z0-9]{6,40}$/i.
 
 function makePlayer(socket, { nickname, avatar, profileId }, turnOrder, isHost) {
   return {
-    id:        socket.id,
+    id:        pidOf(socket),
+    away:      false,
     nickname:  cleanNick(nickname),
     avatar:    sanitizeAvatar(avatar),
     profileId: cleanProfileId(profileId),
@@ -104,15 +115,14 @@ export function registerRoomHandlers(io, socket) {
     rooms.set(code, {
       code,
       password:  data.password ? String(data.password).slice(0, 20) : null,
-      hostId:    socket.id,
+      hostId:    pidOf(socket),
       config:    buildConfig(data.config),
       players:   [player],
       phase:     'lobby',
       createdAt: Date.now(),
     })
 
-    socket.join(code)
-    socket.data.roomCode = code
+    attachSocket(socket, code)
 
     const room = rooms.get(code)
     cb?.({ ok: true, code, config: room.config })
@@ -128,7 +138,7 @@ export function registerRoomHandlers(io, socket) {
   socket.on('room:check', ({ code, password } = {}, cb) => {
     const room = rooms.get(String(code ?? '').toUpperCase().trim())
     if (!room) return cb?.({ ok: false, error: 'No existe una sala con ese código' })
-    if (room.players.some(p => p.id === socket.id)) return cb?.({ ok: true, code: room.code })
+    if (room.players.some(p => p.id === pidOf(socket))) return cb?.({ ok: true, code: room.code })
     if (room.phase !== 'lobby') return cb?.({ ok: false, error: 'Esa partida ya comenzó' })
     if (room.players.length >= room.config.maxPlayers) return cb?.({ ok: false, error: 'La sala está llena' })
     if (room.password && room.password !== password) {
@@ -144,12 +154,16 @@ export function registerRoomHandlers(io, socket) {
     if (!room) return cb?.({ ok: false, error: 'Sala no encontrada' })
 
     // Si ya está dentro (p. ej. el host al entrar al Lobby) no se duplica
-    const already = room.players.find(p => p.id === socket.id)
+    const already = room.players.find(p => p.id === pidOf(socket))
     if (already) {
-      // Actualiza nombre/avatar por si los cambió
-      already.nickname = cleanNick(data.nickname ?? already.nickname)
-      already.avatar   = sanitizeAvatar(data.avatar) ?? already.avatar
-      const isHost = room.hostId === socket.id
+      // Actualiza nombre/avatar por si los cambió (solo en el lobby)
+      if (room.phase === 'lobby') {
+        already.nickname = cleanNick(data.nickname ?? already.nickname)
+        already.avatar   = sanitizeAvatar(data.avatar) ?? already.avatar
+      }
+      attachSocket(socket, code)
+      setPresence(io, code, already.id, false)
+      const isHost = room.hostId === already.id
       cb?.({ ok: true, config: room.config, isHost })
       socket.emit('room:joined', { code, config: room.config, isHost })
       io.to(code).emit('room:players_update', room.players)
@@ -164,8 +178,7 @@ export function registerRoomHandlers(io, socket) {
 
     const player = makePlayer(socket, data, room.players.length, false)
     room.players.push(player)
-    socket.join(code)
-    socket.data.roomCode = code
+    attachSocket(socket, code)
 
     cb?.({ ok: true, config: room.config, isHost: false })
     socket.emit('room:joined', { code, config: room.config, isHost: false })
@@ -185,21 +198,54 @@ export function registerRoomHandlers(io, socket) {
   })
 
   // ── Salir de sala ─────────────────────────────────────────
-  socket.on('room:leave', () => handleLeave(io, socket))
-  socket.on('disconnect', () => handleLeave(io, socket))
+  // (la desconexión NO saca de la sala al instante: ver sessionHandlers.js)
+  socket.on('room:leave', () => {
+    const code = socket.data.roomCode
+    if (!code) return
+    cancelGrace(code, pidOf(socket))
+    removeFromRoom(io, code, pidOf(socket))
+    socket.leave(code)
+    // (no borramos socket.data.roomCode aquí: gameHandlers lo necesita para sacarlo de la partida)
+  })
 }
 
-function handleLeave(io, socket) {
-  const code = socket.data.roomCode
-  if (!code) return
+// Mete este socket a la sala (y lo recuerda para los demás handlers)
+export function attachSocket(socket, code) {
+  socket.join(code)
+  socket.data.roomCode = code
+  cancelGrace(code, pidOf(socket))
+}
 
+// ── Desconexiones con "período de gracia" ─────────────────
+const graceTimers = new Map()   // `${code}:${pid}` → timeout
+export function cancelGrace(code, pid) {
+  const key = `${code}:${pid}`
+  if (graceTimers.has(key)) { clearTimeout(graceTimers.get(key)); graceTimers.delete(key) }
+}
+export function scheduleGrace(code, pid, ms, onExpire) {
+  cancelGrace(code, pid)
+  graceTimers.set(`${code}:${pid}`, setTimeout(() => {
+    graceTimers.delete(`${code}:${pid}`)
+    onExpire()
+  }, ms))
+}
+
+// Marca a un jugador como "reconectando" (away) o de vuelta
+export function setPresence(io, code, pid, away) {
+  const room = rooms.get(code)
+  const p = room?.players.find(x => x.id === pid)
+  if (!p || !!p.away === away) return
+  p.away = away
+  io.to(code).emit('room:players_update', room.players)
+}
+
+// Saca definitivamente a un jugador de la sala
+export function removeFromRoom(io, code, pid) {
   const room = rooms.get(code)
   if (!room) return
-  if (!room.players.some(p => p.id === socket.id)) return
+  if (!room.players.some(p => p.id === pid)) return
 
-  room.players = room.players.filter(p => p.id !== socket.id)
-  socket.leave(code)
-  // (no borramos socket.data.roomCode aquí: gameHandlers lo necesita para sacarlo de la partida)
+  room.players = room.players.filter(p => p.id !== pid)
 
   if (room.players.length === 0) {
     rooms.delete(code)
@@ -208,11 +254,12 @@ function handleLeave(io, socket) {
     return
   }
 
-  // Si el host se va, el siguiente pasa a ser host
-  if (room.hostId === socket.id) {
-    room.hostId = room.players[0].id
+  // Si el host se va, el siguiente (que esté conectado) pasa a ser host
+  if (room.hostId === pid) {
+    const next = room.players.find(p => !p.away) ?? room.players[0]
+    room.hostId = next.id
     room.players.forEach(p => { p.isHost = p.id === room.hostId })
-    io.to(room.players[0].id).emit('room:host_assigned')
+    io.to(chan(next.id)).emit('room:host_assigned')
   }
 
   io.to(code).emit('room:players_update', room.players)

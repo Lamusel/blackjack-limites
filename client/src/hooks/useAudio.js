@@ -1,10 +1,12 @@
 import { useEffect, useCallback } from 'react'
-import { Howl } from 'howler'
+import { Howl, Howler } from 'howler'
 import { useSettings } from './useSettings'
 
 // Mapa de sonidos — las rutas apuntan a client/public/audio/
 const SOUND_MAP = {
-  music_bg:   { src: ['/audio/casino-bg.mp3'],  loop: true,  volume: 0.35 },
+  // html5: la música se reproduce por streaming (mejor en celular y suena aunque
+  // el iPhone tenga el interruptor de silencio para los efectos)
+  music_bg:   { src: ['/audio/casino-bg.mp3'],  loop: true,  volume: 0.35, html5: true },
   card_flip:  { src: ['/audio/card-flip.mp3'],  loop: false, volume: 0.7  },
   correct:    { src: ['/audio/correct.mp3'],    loop: false, volume: 0.8  },
   wrong:      { src: ['/audio/wrong.mp3'],      loop: false, volume: 0.8  },
@@ -33,6 +35,8 @@ const SOUND_MAP = {
 // Instancias compartidas por toda la app (a nivel de módulo)
 const howls = {}
 let musicId = null
+let musicWanted = false      // el usuario tiene la música activada
+let unlocked = false         // el navegador ya dejó sonar audio (hubo un toque)
 
 function getHowl(key) {
   if (!SOUND_MAP[key]) return null
@@ -41,6 +45,7 @@ function getHowl(key) {
 }
 
 function startMusic() {
+  musicWanted = true
   const music = getHowl('music_bg')
   // Evita dos loops encimados si varios componentes usan el hook a la vez
   if (musicId !== null && music.playing(musicId)) return
@@ -49,7 +54,33 @@ function startMusic() {
 }
 
 function pauseMusic() {
+  musicWanted = false
   if (musicId !== null) getHowl('music_bg').pause(musicId)
+}
+
+// ── Desbloqueo de audio ─────────────────────────────────────
+// Los celulares (y Chrome) no dejan sonar nada hasta que la persona toca la
+// pantalla. Si la música intentó arrancar antes, aquí se reintenta en el
+// primer toque/tecla, y otra vez al volver a la app.
+function retryMusic() {
+  try { if (Howler.ctx?.state === 'suspended') Howler.ctx.resume() } catch { /* nada */ }
+  if (!musicWanted) return
+  const music = getHowl('music_bg')
+  if (musicId === null || !music.playing(musicId)) {
+    if (musicId !== null) music.play(musicId)
+    else musicId = music.play()
+  }
+}
+
+if (typeof window !== 'undefined') {
+  const onGesture = () => {
+    unlocked = true
+    retryMusic()
+  }
+  ;['pointerdown', 'touchend', 'keydown'].forEach(ev => window.addEventListener(ev, onGesture, { passive: true }))
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && unlocked) retryMusic()
+  })
 }
 
 export function useAudio() {

@@ -12,7 +12,7 @@ export default function Lobby() {
   const location  = useLocation()
   const navigate  = useNavigate()
   const { emit, on } = useSocket()
-  const { state } = useGame()
+  const { state, leaveRoom } = useGame()
   const password  = location.state?.password ?? ''
   const joined    = useRef(false)
   const [config, setConfig] = useState(null)   // { timeLimit, maxPlayers, topics }
@@ -32,7 +32,7 @@ export default function Lobby() {
       avatar:   state.avatar,
       profileId: state.profileId,
     }, ({ ok, error, config: cfg }) => {
-      if (!ok) { alert(error ?? 'No se pudo unir'); navigate('/rooms'); return }
+      if (!ok) { alert(error ?? 'No se pudo unir'); leaveRoom(); navigate('/rooms'); return }
       if (cfg) setConfig(cfg)
     })
   }, [state.playerId])
@@ -53,7 +53,7 @@ export default function Lobby() {
   }
 
   const handleLeave = () => {
-    emit('room:leave')
+    leaveRoom()
     navigate('/rooms')
   }
 
@@ -125,10 +125,15 @@ export default function Lobby() {
                   <div className="relative">
                     <div className="rounded-full p-[3px]" title={winTier(p.wins)?.label}
                       style={{ background: winTier(p.wins)?.ring ?? (isMe ? '#c9a84c' : '#2e2a25') }}>
-                      <div className="rounded-full overflow-hidden" style={{ width: 56, height: 56 }}>
+                      <div className={`rounded-full overflow-hidden ${p.away ? 'opacity-50 grayscale' : ''}`} style={{ width: 56, height: 56 }}>
                         <AvatarRenderer nickname={p.nickname} avatar={p.avatar} size={56} framing="bust" animated />
                       </div>
                     </div>
+                    {p.away && (
+                      <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap px-1.5 rounded-pill bg-noir-700 border border-noir-500 text-[9px] font-sans text-warm-400 animate-pulse">
+                        reconectando…
+                      </span>
+                    )}
                     {p.id === hostId && (
                       <span className="absolute -top-2 left-1/2 -translate-x-1/2 text-gold-500 text-sm" title="Host">♛</span>
                     )}

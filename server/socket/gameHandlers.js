@@ -1,4 +1,4 @@
-import { rooms, broadcastRooms } from './roomHandlers.js'
+import { rooms, broadcastRooms, chan, pidOf } from './roomHandlers.js'
 import { applyResult, resolveWinners, buildRanking, nextInRound, firstInRound, canPlay } from '../lib/gameLogic.js'
 import { computeBadges, BADGES } from '../lib/achievements.js'
 import { getExercise } from '../services/aiExercises.js'
@@ -29,6 +29,7 @@ import { makeForecast, drawFromForecast, penaltyFor } from '../lib/cards.js'
 const games = new Map()
 
 const RESULT_PAUSE_MS = 2500
+const FINISHED_KEEP_MS = 10 * 60 * 1000   // el podio se puede recuperar 10 min después
 const ACE_CHOICE_MS   = 15000
 
 // Lo que viaja al cliente: SIN respuesta correcta ni explicación (anti-trampa)
@@ -46,6 +47,7 @@ function publicCard(card) {
 const norm = (s) => String(s ?? '').trim()
 
 export function registerGameHandlers(io, socket) {
+  const me = () => pidOf(socket)
 
   // ── Iniciar partida (solo host) ───────────────────────────
   socket.on('game:start', async (_, cb) => {
@@ -53,7 +55,7 @@ export function registerGameHandlers(io, socket) {
     const room = rooms.get(code)
 
     if (!room) return cb?.({ ok: false, error: 'Sala no encontrada' })
-    if (room.hostId !== socket.id) return cb?.({ ok: false, error: 'Solo el host puede iniciar' })
+    if (room.hostId !== me()) return cb?.({ ok: false, error: 'Solo el host puede iniciar' })
     if (room.players.length < 2) return cb?.({ ok: false, error: 'Mínimo 2 jugadores' })
 
     // Evita partidas duplicadas si el host da varios clics
@@ -99,14 +101,14 @@ export function registerGameHandlers(io, socket) {
     const code = socket.data.roomCode
     const game = games.get(code)
     if (!game) return cb?.({ ok: false, error: 'No hay partida' })
-    if (game.currentPlayerId !== socket.id) return cb?.({ ok: false, error: 'No es tu turno' })
+    if (game.currentPlayerId !== me()) return cb?.({ ok: false, error: 'No es tu turno' })
 
     if (type === 'stand') {
       // Si ya pediste carta, tienes que responderla
       if (game.cardDrawn) return cb?.({ ok: false, error: 'Ya pediste carta: debes responder' })
 
       clearTurnTimer(game)
-      markPassed(io, code, game, socket.id)
+      markPassed(io, code, game, me())
       cb?.({ ok: true })
       await advanceTurn(io, code, game)
       return
@@ -123,19 +125,19 @@ export function registerGameHandlers(io, socket) {
       card.penalty = card.isAce ? 1 : penaltyFor(card.value)
       game.card = card
 
-      io.to(code).emit('game:card_drawn', { playerId: socket.id, card: publicCard(card) })
+      io.to(code).emit('game:card_drawn', { playerId: me(), card: publicCard(card) })
       announce(io, code, {
-        type: card.isAce ? 'ace' : 'draw', playerId: socket.id,
+        type: card.isAce ? 'ace' : 'draw', playerId: me(),
         cardPoints: card.isAce ? 'A' : card.value, difficulty: card.difficulty,
       })
       cb?.({ ok: true, card: publicCard(card) })
 
       const exercise = await getExercise({ difficulty: card.difficulty, usedIds: game.usedExerciseIds, topics: game.config.topics })
-      if (games.get(code) !== game || game.currentPlayerId !== socket.id || game.answered) return
+      if (games.get(code) !== game || game.currentPlayerId !== me() || game.answered) return
       if (exercise) game.usedExerciseIds.add(exercise.id)
       game.currentExercise = { ...exercise, points: card.isAce ? 11 : card.value }
 
-      socket.emit('game:exercise', { exercise: publicExercise(game.currentExercise), card: publicCard(card) })
+      io.to(chan(me())).emit('game:exercise', { exercise: publicExercise(game.currentExercise), card: publicCard(card) })
     }
   })
 
@@ -144,9 +146,10 @@ export function registerGameHandlers(io, socket) {
     const code = socket.data.roomCode
     const game = games.get(code)
     if (!game) return cb?.({ ok: false, error: 'No hay partida' })
-    if (game.currentPlayerId !== socket.id) return cb?.({ ok: false, error: 'No es tu turno' })
+    if (game.currentPlayerId !== me()) return cb?.({ ok: false, error: 'No es tu turno' })
     if (!game.cardDrawn || game.answered) return cb?.({ ok: false, error: 'Primero pide carta' })
-    if (game.fiftyUsed.has(socket.id)) return cb?.({ ok: false, error: 'Ya usaste tu 50/50' })
+    if (game.fiftyUsed.has(me())) return cb?.({ ok: false, used: true, error: 'Ya usaste tu 50/50' })
+    if (game.awaitingAce) return cb?.({ ok: false, error: 'Ya respondiste' })
 
     const ex = game.currentExercise
     if (!ex?.options) return cb?.({ ok: false, error: 'La carta aún se está repartiendo' })
@@ -154,9 +157,10 @@ export function registerGameHandlers(io, socket) {
     shuffleInPlace(wrong)
     const remove = wrong.slice(0, 2)
 
-    game.fiftyUsed.add(socket.id)
-    io.to(code).emit('game:fifty_used', { playerId: socket.id })
-    announce(io, code, { type: 'fifty', playerId: socket.id })
+    game.fiftyUsed.add(me())
+    game.fiftyRemove = remove
+    io.to(code).emit('game:fifty_used', { playerId: me() })
+    announce(io, code, { type: 'fifty', playerId: me() })
     cb?.({ ok: true, remove })
   })
 
@@ -165,7 +169,7 @@ export function registerGameHandlers(io, socket) {
     const code = socket.data.roomCode
     const game = games.get(code)
     if (!game) return cb?.({ ok: false })
-    if (game.currentPlayerId !== socket.id) return cb?.({ ok: false, error: 'No es tu turno' })
+    if (game.currentPlayerId !== me()) return cb?.({ ok: false, error: 'No es tu turno' })
 
     const exercise = game.currentExercise
     if (!exercise || exercise.id !== exerciseId || game.answered) return cb?.({ ok: false })
@@ -177,54 +181,100 @@ export function registerGameHandlers(io, socket) {
 
     // As acertado → el jugador elige si vale 1 u 11
     if (correct && game.card?.isAce) {
-      const player = game.players.find(p => p.id === socket.id)
-      game.awaitingAce = { answer }
-      socket.emit('game:ace_choice', { points: player?.points ?? 0, timeLimit: ACE_CHOICE_MS / 1000 })
-      announce(io, code, { type: 'ace_choice', playerId: socket.id })
+      const player = game.players.find(p => p.id === me())
+      game.awaitingAce = { answer, startedAt: Date.now() }
+      io.to(chan(me())).emit('game:ace_choice', { points: player?.points ?? 0, timeLimit: ACE_CHOICE_MS / 1000 })
+      announce(io, code, { type: 'ace_choice', playerId: me() })
       game.timer = setTimeout(() => {
         if (games.get(code) !== game || !game.awaitingAce) return
         const pts = player?.points ?? 0
-        chooseAce(io, code, game, socket.id, pts + 11 <= 21 ? 11 : 1)
+        chooseAce(io, code, game, me(), pts + 11 <= 21 ? 11 : 1)
       }, ACE_CHOICE_MS)
       return
     }
 
-    await resolveAnswer(io, code, game, socket.id, answer, correct)
+    await resolveAnswer(io, code, game, me(), answer, correct)
   })
 
   // ── Elegir valor del As (1 u 11) ──────────────────────────
   socket.on('game:ace', ({ value } = {}, cb) => {
     const code = socket.data.roomCode
     const game = games.get(code)
-    if (!game || game.currentPlayerId !== socket.id || !game.awaitingAce) return cb?.({ ok: false })
+    if (!game || game.currentPlayerId !== me() || !game.awaitingAce) return cb?.({ ok: false })
     if (value !== 1 && value !== 11) return cb?.({ ok: false, error: 'El As vale 1 u 11' })
     cb?.({ ok: true })
-    chooseAce(io, code, game, socket.id, value)
+    chooseAce(io, code, game, me(), value)
   })
 
-  // ── Si alguien se va o se desconecta en plena partida ─────
-  const onLeave = () => {
-    const code = socket.data.roomCode
-    const game = code && games.get(code)
-    if (!game) return
-    const player = game.players.find(p => p.id === socket.id)
-    if (!player || player.left) return
+  // ── Si alguien sale de la sala en plena partida ───────────
+  // (las desconexiones tienen período de gracia: ver sessionHandlers.js)
+  socket.on('room:leave', () => leaveGame(io, socket.data.roomCode, me()))
+}
 
-    player.left   = true
-    player.status = player.status === 'active' ? 'standing' : player.status   // 'standing' = se fue
-    io.to(code).emit('game:points_update', {
-      playerId: player.id, points: player.points, status: player.status, left: true,
-    })
+// Saca a un jugador de la partida (salió o no volvió a tiempo)
+export function leaveGame(io, code, pid) {
+  const game = code && games.get(code)
+  if (!game) return
+  const player = game.players.find(p => p.id === pid)
+  if (!player || player.left) return
 
-    if (game.currentPlayerId === socket.id) {
-      clearTurnTimer(game)
-      advanceTurn(io, code, game)
-    } else if (!game.players.some(canPlay)) {
-      endGame(io, code, game)
-    }
+  player.left   = true
+  player.away   = false
+  player.status = player.status === 'active' ? 'standing' : player.status   // 'standing' = se fue
+  io.to(code).emit('game:points_update', {
+    playerId: player.id, points: player.points, status: player.status, left: true, away: false,
+  })
+
+  if (game.currentPlayerId === pid) {
+    clearTurnTimer(game)
+    advanceTurn(io, code, game)
+  } else if (!game.players.some(canPlay)) {
+    endGame(io, code, game)
   }
-  socket.on('room:leave', onLeave)
-  socket.on('disconnect', onLeave)
+}
+
+export const hasGame = (code) => games.has(code)
+
+// Marca a un jugador como "reconectando…" para que los demás lo vean
+export function setGamePresence(io, code, pid, away) {
+  const game = games.get(code)
+  const player = game?.players.find(p => p.id === pid)
+  if (!player || player.left || !!player.away === away) return
+  player.away = away
+  io.to(code).emit('game:points_update', {
+    playerId: pid, points: player.points, status: player.status, away,
+  })
+}
+
+// Foto completa de la partida para quien vuelve (refrescó o se le cortó)
+export function getGameSnapshot(code, pid) {
+  const game = games.get(code)
+  if (!game) return null
+  const isMine = game.currentPlayerId === pid
+  const elapsed = Math.floor((Date.now() - (game.turnStartedAt ?? Date.now())) / 1000)
+  const timeLimit = game.config.timeLimit
+  const aceLeft = game.awaitingAce
+    ? Math.max(1, Math.ceil((ACE_CHOICE_MS - (Date.now() - game.awaitingAce.startedAt)) / 1000))
+    : null
+  return {
+    code,
+    config:        game.config,
+    players:       game.players,
+    round:         game.round,
+    currentTurn:   game.currentPlayerId,
+    timeLimit,
+    timeRemaining: Math.max(0, timeLimit - elapsed),
+    forecast:      game.forecast ?? null,
+    cardDrawn:     !!game.cardDrawn,
+    card:          publicCard(game.card),
+    fiftyUsedBy:   [...game.fiftyUsed],
+    // Lo privado solo si es MI turno
+    exercise:       isMine && game.cardDrawn && (!game.answered || game.awaitingAce) ? publicExercise(game.currentExercise) : null,
+    removedOptions: isMine ? (game.fiftyRemove ?? []) : [],
+    aceChoice:      isMine && game.awaitingAce
+      ? { points: game.players.find(p => p.id === pid)?.points ?? 0, timeLimit: aceLeft }
+      : null,
+  }
 }
 
 // ── Helpers internos ──────────────────────────────────────
@@ -276,7 +326,7 @@ async function resolveAnswer(io, code, game, playerId, answer, correct, aceValue
   })
 
   // Resultado PRIVADO al jugador
-  io.to(playerId).emit('game:turn_result', {
+  io.to(chan(playerId)).emit('game:turn_result', {
     exerciseId:    exercise.id,
     correct,
     pointsDelta:   delta,
@@ -327,7 +377,9 @@ async function startTurn(io, code) {
   game.awaitingAce     = null
   game.currentExercise = null
   game.card            = null
+  game.fiftyRemove     = []
   game.forecast        = makeForecast()
+  game.turnStartedAt   = Date.now()
 
   const timeLimit = game.config.timeLimit
 
@@ -410,23 +462,29 @@ function endGame(io, code, game) {
     : !game.players.some(canPlay)      ? 'no_players'
     : 'all_passed'
 
-  io.to(code).emit('game:finished', {
+  const finished = {
     ranking,
     winner:  winners[0] ?? null,   // compatibilidad
     winners: winnerIds,
     badges:  BADGES,
     reason,
     rounds:  game.round,
-  })
+  }
+  io.to(code).emit('game:finished', finished)
 
   // Repaso PRIVADO: cada jugador recibe solo sus ejercicios
   for (const [playerId, history] of game.history) {
-    io.to(playerId).emit('game:review', { history })
+    io.to(chan(playerId)).emit('game:review', { history })
   }
 
   games.delete(code)
   const room = rooms.get(code)
-  if (room) room.phase = 'lobby'
+  if (room) {
+    room.phase = 'lobby'
+    // Por si alguien estaba reconectando justo al terminar: puede ver su podio al volver
+    room.lastFinished = { at: Date.now(), finished, reviews: new Map(game.history) }
+    setTimeout(() => { if (room.lastFinished?.finished === finished) room.lastFinished = null }, FINISHED_KEEP_MS)
+  }
   broadcastRooms(io)
 
   // Estadísticas (en segundo plano, no bloquea)

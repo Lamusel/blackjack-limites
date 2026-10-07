@@ -11,12 +11,14 @@ import Game         from '@/pages/Game'
 import HowToPlay    from '@/pages/HowToPlay'
 import AvatarStudio from '@/pages/AvatarStudio'
 import Profile      from '@/pages/Profile'
+import SessionKeeper from '@/components/ui/SessionKeeper'
 
 export default function App() {
   return (
     <SettingsProvider>
       <SocketProvider>
         <GameProvider>
+          <SessionKeeper />
           <Routes>
             <Route path="/"            element={<Home />} />
             <Route path="/rooms"       element={<Rooms />} />

@@ -223,7 +223,7 @@ export default function AvatarStudio() {
   }
 
   const save = () => {
-    saveAvatar(draft)
+    saveAvatar(draft, nickname)
     dispatch({ type: 'SET_PLAYER_INFO', payload: { avatar: draft } })
     play('stand')
     navigate(-1)

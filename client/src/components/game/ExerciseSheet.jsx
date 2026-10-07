@@ -92,6 +92,16 @@ export default function ExerciseSheet({
   const penalty = card?.penalty ?? (isAce ? 1 : penaltyFor(exercise.points ?? 2))
   const locked  = !!selected || !!result
 
+  // Anti "toque fantasma" en celular: justo después de usar el 50/50
+  // (o de abrir la hoja) las opciones no aceptan toques por un instante,
+  // así un doble toque nunca elige una respuesta sin querer.
+  const [armedAt, setArmedAt] = useState(() => Date.now() + 500)
+  useEffect(() => { setArmedAt(Date.now() + 500) }, [removedOptions.length, exercise.id])
+  const pick = (opt) => {
+    if (Date.now() < armedAt) return
+    onAnswer(opt)
+  }
+
   const optionClass = (opt) => {
     const base = 'w-full text-left rounded-btn px-4 py-3 font-sans text-sm border transition-all flex items-start gap-2'
     const removed = removedOptions.includes(opt)
@@ -154,7 +164,8 @@ export default function ExerciseSheet({
             </div>
 
             {/* 50/50 (comodín bien visible) */}
-            <button onClick={onFifty} disabled={!fiftyAvailable || locked || fiftyLoading}
+            <button type="button" onClick={(e) => { e.stopPropagation(); onFifty?.() }}
+              disabled={!fiftyAvailable || locked || fiftyLoading}
               title={fiftyAvailable ? 'Quita 2 opciones incorrectas (1 por partida)' : 'Ya usaste tu 50/50'}
               className={`relative flex-shrink-0 flex flex-col items-center justify-center w-[62px] h-[52px] rounded-[12px] border-2 transition-all
                 ${fiftyAvailable && !locked
@@ -179,7 +190,7 @@ export default function ExerciseSheet({
             {exercise.options.map((opt, i) => {
               const removed = removedOptions.includes(opt)
               return (
-                <button key={i} disabled={locked || removed} onClick={() => onAnswer(opt)} className={optionClass(opt)}>
+                <button type="button" key={i} disabled={locked || removed} onClick={() => pick(opt)} className={optionClass(opt)}>
                   <span className="text-warm-600 font-mono flex-shrink-0 pt-0.5">{LETTERS[i]}.</span>
                   <MathText text={opt} className="break-words min-w-0" />
                 </button>

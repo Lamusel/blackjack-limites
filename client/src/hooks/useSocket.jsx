@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { io } from 'socket.io-client'
+import { getPid } from '@/lib/session'
 
 const SocketContext = createContext(null)
 
@@ -25,9 +26,12 @@ function getSocket() {
   if (!socketSingleton) {
     socketSingleton = io(resolveSocketUrl(), {
       autoConnect:          false,
+      // Identidad fija de esta pestaña: si se corta la conexión, el server te reconoce
+      auth:                 { pid: getPid() },
       reconnection:         true,
-      reconnectionAttempts: 10,
-      reconnectionDelay:    1000,
+      reconnectionAttempts: Infinity,     // el celular puede tardar en volver a la app
+      reconnectionDelay:    800,
+      reconnectionDelayMax: 4000,
       transports:           ['websocket', 'polling'],
     })
   }
@@ -44,13 +48,24 @@ export function SocketProvider({ children }) {
     const onDisconnect = () => { setConnected(false) }
     const onError      = (err) => console.warn('[socket] error de conexión:', err.message)
 
+    // Al volver a la pestaña/app (celular), reconectar de una vez si se cortó
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !socket.connected) socket.connect()
+    }
+
     socket.on('connect',       onConnect)
     socket.on('disconnect',    onDisconnect)
     socket.on('connect_error', onError)
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('online', onVisible)
+    window.addEventListener('focus', onVisible)
     if (!socket.connected) socket.connect()
     else onConnect()
 
     return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('online', onVisible)
+      window.removeEventListener('focus', onVisible)
       socket.off('connect',       onConnect)
       socket.off('disconnect',    onDisconnect)
       socket.off('connect_error', onError)

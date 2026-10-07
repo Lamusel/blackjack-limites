@@ -1,4 +1,4 @@
-import { rooms } from './roomHandlers.js'
+import { rooms, pidOf } from './roomHandlers.js'
 
 // ─────────────────────────────────────────────────────────────
 // Reacciones en la mesa
@@ -23,21 +23,21 @@ export function registerReactionHandlers(io, socket) {
   socket.on('game:react', ({ kind, to } = {}, cb) => {
     const code = socket.data.roomCode
     const room = code && rooms.get(code)
-    if (!room || !room.players.some(p => p.id === socket.id)) return cb?.({ ok: false })
+    if (!room || !room.players.some(p => p.id === pidOf(socket))) return cb?.({ ok: false })
 
     const now = Date.now()
     if (now - lastAt < COOLDOWN_MS) return cb?.({ ok: false, error: 'Espera un momento', retryIn: COOLDOWN_MS - (now - lastAt) })
 
     if (EMOTES.includes(kind)) {
       lastAt = now
-      io.to(code).emit('game:reaction', { id: `${socket.id}-${now}`, kind, from: socket.id, to: null })
+      io.to(code).emit('game:reaction', { id: `${pidOf(socket)}-${now}`, kind, from: pidOf(socket), to: null })
       return cb?.({ ok: true })
     }
 
     if (THROWABLE.includes(kind)) {
-      if (!to || to === socket.id || !room.players.some(p => p.id === to)) return cb?.({ ok: false, error: 'Elige a otro jugador' })
+      if (!to || to === pidOf(socket) || !room.players.some(p => p.id === to)) return cb?.({ ok: false, error: 'Elige a otro jugador' })
       lastAt = now
-      io.to(code).emit('game:reaction', { id: `${socket.id}-${now}`, kind, from: socket.id, to })
+      io.to(code).emit('game:reaction', { id: `${pidOf(socket)}-${now}`, kind, from: pidOf(socket), to })
       return cb?.({ ok: true })
     }
 

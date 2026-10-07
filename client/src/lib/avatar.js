@@ -1,3 +1,4 @@
+import { avatarFor, saveAvatarFor } from './session'
 // ─────────────────────────────────────────────────────────────
 // Avatar noir — catálogo de opciones, generación por nickname y validación
 // ─────────────────────────────────────────────────────────────
@@ -463,16 +464,12 @@ export function isLight(hex) {
   return (r * 299 + g * 587 + b * 114) / 1000 > 150
 }
 
-// ── Guardado local ────────────────────────────────────────────
-const STORAGE_KEY = 'bl_avatar'
-export function loadAvatar() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch { return null }
+// ── Guardado local (por nombre: cada jugador tiene su propio avatar) ──
+export function loadAvatar(nickname) {
+  return avatarFor(nickname)
 }
-export function saveAvatar(avatar) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(avatar)) } catch { /* nada */ }
+export function saveAvatar(avatar, nickname) {
+  saveAvatarFor(nickname, avatar)
 }
 
 // ── Marco según victorias (bronce · plata · oro) ─────────────

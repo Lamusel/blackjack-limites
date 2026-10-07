@@ -1,23 +1,11 @@
-import { createContext, useContext, useReducer, useEffect } from 'react'
+import { createContext, useContext, useReducer, useEffect, useCallback } from 'react'
 import { useSocket } from './useSocket'
-import { loadAvatar } from '@/lib/avatar'
+import {
+  getPid, getActiveRoom, setActiveRoom, clearActiveRoom,
+  loadNickname, saveNickname, profileIdFor, avatarFor,
+} from '@/lib/session'
 
 const GameContext = createContext(null)
-
-// Id de perfil persistente (para las estadísticas). Sin crypto.randomUUID:
-// no existe en http del celular.
-function getProfileId() {
-  try {
-    let id = localStorage.getItem('bl_profile_id')
-    if (!id) {
-      id = 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
-      localStorage.setItem('bl_profile_id', id)
-    }
-    return id
-  } catch {
-    return null
-  }
-}
 
 // ── Estado inicial ──────────────────────────────────────────
 const INITIAL_STATE = {
@@ -26,7 +14,7 @@ const INITIAL_STATE = {
   roomConfig:  { timeLimit: 90, maxPlayers: 6, topics: [] },
   isHost:      false,
 
-  // jugador local (playerId = id del socket, que es como el server nos conoce)
+  // jugador local (playerId = pid fijo de esta pestaña: sobrevive a refrescar)
   playerId:    null,
   nickname:    '',
   avatar:      null,   // config del estudio (null = automático por nickname)
@@ -64,6 +52,9 @@ const INITIAL_STATE = {
   endReason:    null,   // 'twentyone' | 'all_passed' | 'no_players'
   badgeCatalog: null,   // { clave: { icon, label, desc } } (viene del server)
   review:       [],   // MI repaso privado: ejercicios que respondí
+
+  // reconexión: { status: 'pending' | 'ok' | 'failed' | 'none', phase, code, at }
+  resume: null,
 }
 
 // ── Reducer ─────────────────────────────────────────────────
@@ -72,6 +63,70 @@ function gameReducer(state, action) {
 
     case 'SET_PLAYER_INFO':
       return { ...state, ...action.payload }
+
+    case 'RESUME_STATUS':
+      return { ...state, resume: { ...action.payload, at: Date.now() } }
+
+    // ── Volví a la sala de espera ──
+    case 'RESUME_LOBBY':
+      return {
+        ...state,
+        roomCode:   action.payload.code,
+        roomConfig: action.payload.config ?? state.roomConfig,
+        isHost:     !!action.payload.isHost,
+        players:    action.payload.players ?? state.players,
+        phase:      'lobby',
+      }
+
+    // ── Volví a una partida en curso: se restaura TODO ──
+    case 'RESUME_GAME': {
+      const sn = action.payload.snapshot
+      return {
+        ...state,
+        roomCode:       action.payload.code,
+        roomConfig:     action.payload.config ?? state.roomConfig,
+        isHost:         !!action.payload.isHost,
+        phase:          'playing',
+        players:        sn.players,
+        round:          sn.round,
+        currentTurn:    sn.currentTurn,
+        myTurn:         sn.currentTurn === state.playerId,
+        turnTotal:      sn.timeLimit,
+        timeRemaining:  sn.timeRemaining,
+        forecast:       sn.forecast,
+        cardDrawn:      sn.cardDrawn,
+        card:           sn.card,
+        exercise:       sn.exercise,
+        removedOptions: sn.removedOptions ?? [],
+        aceChoice:      sn.aceChoice,
+        fiftyUsedBy:    sn.fiftyUsedBy ?? [],
+        lastResult:     null,
+        finalRanking:   [],
+        winners:        [],
+      }
+    }
+
+    // ── La partida terminó mientras no estaba: ver el podio igual ──
+    case 'RESUME_FINISHED': {
+      const f = action.payload.finished
+      return {
+        ...state,
+        roomCode:     action.payload.code,
+        roomConfig:   action.payload.config ?? state.roomConfig,
+        isHost:       !!action.payload.isHost,
+        players:      action.payload.players ?? state.players,
+        phase:        'finished',
+        finalRanking: f.ranking ?? [],
+        winner:       f.winner ?? null,
+        winners:      f.winners ?? [],
+        endReason:    f.reason ?? null,
+        badgeCatalog: f.badges ?? state.badgeCatalog,
+        round:        f.rounds ?? state.round,
+        review:       action.payload.review ?? [],
+        myTurn:       false,
+        exercise:     null,
+      }
+    }
 
     case 'JOIN_ROOM':
       return {
@@ -167,7 +222,7 @@ function gameReducer(state, action) {
         ...state,
         players: state.players.map(p => {
           if (p.id !== action.payload.playerId) return p
-          const { points, status, passed, left, streak } = action.payload
+          const { points, status, passed, left, streak, away } = action.payload
           return {
             ...p,
             points,
@@ -175,6 +230,7 @@ function gameReducer(state, action) {
             ...(passed !== undefined && { passed }),
             ...(left   !== undefined && { left }),
             ...(streak !== undefined && { streak }),
+            ...(away   !== undefined && { away }),
           }
         }),
       }
@@ -200,7 +256,7 @@ function gameReducer(state, action) {
       return { ...state, review: action.payload.history ?? [] }
 
     case 'RESET':
-      return { ...INITIAL_STATE, playerId: state.playerId, nickname: state.nickname, avatar: state.avatar, profileId: state.profileId }
+      return { ...INITIAL_STATE, playerId: state.playerId, nickname: state.nickname, avatar: state.avatar, profileId: state.profileId, resume: { status: 'none' } }
 
     default:
       return state
@@ -210,32 +266,54 @@ function gameReducer(state, action) {
 // ── Provider ────────────────────────────────────────────────
 export function GameProvider({ children }) {
   const [state, dispatch] = useReducer(gameReducer, INITIAL_STATE, (init) => {
-    // Recuperar el nickname guardado (sin crypto.randomUUID: no existe en http del celular)
-    try {
-      const nickname  = localStorage.getItem('bl_nickname') || ''
-      const avatar    = loadAvatar()
-      const profileId = getProfileId()
-      return { ...init, nickname, avatar, profileId }
-    } catch {
-      return init
+    const nickname = loadNickname()
+    return {
+      ...init,
+      playerId:  getPid(),
+      nickname,
+      avatar:    avatarFor(nickname),
+      profileId: profileIdFor(nickname),
     }
   })
-  const { on, socketId } = useSocket()
+  const { on, emit, connected } = useSocket()
 
-  // playerId = id del socket (lo que usa el server para identificarnos)
+  // Cada NOMBRE es un jugador distinto en este navegador:
+  // al cambiar el nombre cambian el perfil (estadísticas) y el avatar guardado.
   useEffect(() => {
-    if (socketId) dispatch({ type: 'SET_PLAYER_INFO', payload: { playerId: socketId } })
-  }, [socketId])
-
-  // Guardar nickname para la próxima vez
-  useEffect(() => {
-    try { if (state.nickname) localStorage.setItem('bl_nickname', state.nickname) } catch { /* nada */ }
+    saveNickname(state.nickname)
+    const profileId = profileIdFor(state.nickname)
+    const avatar    = avatarFor(state.nickname)
+    if (profileId !== state.profileId || JSON.stringify(avatar) !== JSON.stringify(state.avatar)) {
+      dispatch({ type: 'SET_PLAYER_INFO', payload: { profileId, avatar } })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.nickname])
+
+  // ── Reconexión: cada vez que el socket (re)conecta, volver a mi sala ──
+  useEffect(() => {
+    if (!connected) return
+    const code = getActiveRoom()
+    if (!code) { dispatch({ type: 'RESUME_STATUS', payload: { status: 'none' } }); return }
+
+    dispatch({ type: 'RESUME_STATUS', payload: { status: 'pending', code } })
+    emit('session:resume', { code }, (res) => {
+      if (!res?.ok) {
+        clearActiveRoom()
+        dispatch({ type: 'RESUME_STATUS', payload: { status: 'failed', code } })
+        return
+      }
+      setActiveRoom(res.code)
+      if (res.phase === 'playing')       dispatch({ type: 'RESUME_GAME',     payload: res })
+      else if (res.phase === 'finished') dispatch({ type: 'RESUME_FINISHED', payload: res })
+      else                               dispatch({ type: 'RESUME_LOBBY',    payload: res })
+      dispatch({ type: 'RESUME_STATUS', payload: { status: 'ok', phase: res.phase, code: res.code } })
+    })
+  }, [connected, emit])
 
   // Listeners de socket → reducer (on es estable, se registran una vez)
   useEffect(() => {
     const offs = [
-      on('room:joined',          p => dispatch({ type: 'JOIN_ROOM',            payload: p })),
+      on('room:joined',          p => { setActiveRoom(p.code); dispatch({ type: 'JOIN_ROOM', payload: p }) }),
       on('room:host_assigned',   ()=> dispatch({ type: 'HOST_ASSIGNED' })),
       on('room:players_update',  p => dispatch({ type: 'PLAYERS_UPDATE',       payload: p })),
       on('game:started',         p => dispatch({ type: 'GAME_STARTED',         payload: p })),
@@ -261,8 +339,15 @@ export function GameProvider({ children }) {
     return () => clearInterval(t)
   }, [state.currentTurn, state.phase, state.timeRemaining > 0])
 
+  // Salir de la sala a propósito (no es una desconexión): se olvida la sala activa
+  const leaveRoom = useCallback(() => {
+    emit('room:leave')
+    clearActiveRoom()
+    dispatch({ type: 'RESET' })
+  }, [emit])
+
   return (
-    <GameContext.Provider value={{ state, dispatch }}>
+    <GameContext.Provider value={{ state, dispatch, leaveRoom }}>
       {children}
     </GameContext.Provider>
   )

@@ -14,7 +14,7 @@ import SettingsButton from '@/components/ui/SettingsButton'
 export default function Game() {
   const { code }  = useParams()
   const navigate  = useNavigate()
-  const { state, dispatch } = useGame()
+  const { state, dispatch, leaveRoom } = useGame()
   const { emit }  = useSocket()
   const { play }  = useAudio()
 
@@ -49,13 +49,15 @@ export default function Game() {
   // En mi siguiente turno se cierra la hoja vieja
   useEffect(() => { if (myTurn) setSnapshot(null) }, [myTurn, currentTurn])
 
-  // Si llegamos a /game sin partida (recarga), volver al inicio
+  // Si llegamos a /game sin partida: esperamos la reconexión; si no hay a dónde volver → inicio
+  const resumeStatus = state.resume?.status
   useEffect(() => {
-    if (!players.length && state.phase !== 'finished') {
-      const t = setTimeout(() => navigate('/'), 1500)
+    if (players.length || state.phase === 'finished') return
+    if (resumeStatus === 'failed' || resumeStatus === 'none') {
+      const t = setTimeout(() => navigate('/'), 600)
       return () => clearTimeout(t)
     }
-  }, [players.length, state.phase, navigate])
+  }, [players.length, state.phase, resumeStatus, navigate])
 
   // ── Acciones ───────────────────────────────────────────────
   const handleDraw = () => {
@@ -71,14 +73,18 @@ export default function Game() {
     })
   }
 
+  // 50/50: una sola vez por partida (el server lo controla por jugador, no por conexión)
   const handleFifty = () => {
-    if (!fiftyAvailable || fiftyLoading) return
+    if (!fiftyAvailable || fiftyLoading || selected || !exercise) return
     setFiftyLoading(true)
     emit('game:fifty', {}, (res) => {
       setFiftyLoading(false)
       if (res?.ok) {
         play('stand')
         dispatch({ type: 'REMOVE_OPTIONS', payload: res.remove ?? [] })
+        dispatch({ type: 'FIFTY_USED', payload: { playerId } })
+      } else if (res?.used) {
+        dispatch({ type: 'FIFTY_USED', payload: { playerId } })
       }
     })
   }
@@ -94,6 +100,17 @@ export default function Game() {
     emit('game:answer', { exerciseId: exercise.id, answer })
   }
 
+  // ── Volviendo a la partida (refresco / reconexión) ─────────
+  if (!players.length && state.phase !== 'finished') {
+    return (
+      <div className="min-h-[100dvh] bg-noir-900 flex flex-col items-center justify-center gap-3">
+        <div className="w-10 h-10 rounded-full border-2 border-gold-500 border-t-transparent animate-spin" />
+        <p className="text-cream font-serif">Volviendo a tu mesa…</p>
+        <p className="text-warm-600 text-xs font-sans">Sala {code}</p>
+      </div>
+    )
+  }
+
   // ── Fin de partida ─────────────────────────────────────────
   if (state.phase === 'finished') {
     return (
@@ -106,7 +123,7 @@ export default function Game() {
         review={state.review ?? []}
         badgeCatalog={state.badgeCatalog}
         onProfile={() => navigate('/profile')}
-        onHome={() => navigate('/')}
+        onHome={() => { leaveRoom(); navigate('/') }}
         onRooms={() => navigate(`/lobby/${code}`)}
       />
     )

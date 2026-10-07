@@ -10,6 +10,7 @@ import profileRouter  from './routes/profiles.js'
 import { registerRoomHandlers }     from './socket/roomHandlers.js'
 import { registerGameHandlers }     from './socket/gameHandlers.js'
 import { registerReactionHandlers } from './socket/reactionHandlers.js'
+import { registerSessionHandlers }  from './socket/sessionHandlers.js'
 
 const app    = express()
 const server = createServer(app)
@@ -50,7 +51,8 @@ const io = new Server(server, {
 })
 
 io.on('connection', (socket) => {
-  console.log(`[socket] conectado: ${socket.id}`)
+  registerSessionHandlers(io, socket)        // primero: fija el pid estable del jugador
+  console.log(`[socket] conectado: ${socket.id} (pid ${socket.data.pid.slice(0, 10)})`)
   registerRoomHandlers(io, socket)
   registerGameHandlers(io, socket)
   registerReactionHandlers(io, socket)

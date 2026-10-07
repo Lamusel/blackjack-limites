@@ -23,7 +23,8 @@ export default function Seat({
   const pct        = turnTotal > 0 ? Math.max(0, Math.min(1, timeRemaining / turnTotal)) : 0
   const danger     = isTurn && timeRemaining <= 10
   const eliminated = player.status === 'eliminated'
-  const left       = !!player.left                          // se desconectó
+  const left       = !!player.left                          // salió de la partida
+  const away       = !left && !!player.away                 // se le cortó la conexión (puede volver)
   const standing   = !left && !!player.passed && !isTurn    // se plantó en esta vuelta
   const winner     = player.status === 'winner'
 
@@ -53,13 +54,19 @@ export default function Seat({
         <div
           className={`absolute rounded-full overflow-hidden bg-noir-800 border-2 transition-all
             ${isTurn ? 'border-transparent animate-seat-glow' : winner ? 'border-gold-400' : standing ? 'border-stand-text/60' : tier ? 'border-noir-900' : 'border-gold-600/45'}
-            ${left ? 'grayscale opacity-50' : eliminated ? 'grayscale-[.7] opacity-75' : ''}`}
+            ${left ? 'grayscale opacity-50' : away ? 'grayscale opacity-60' : eliminated ? 'grayscale-[.7] opacity-75' : ''}`}
           style={{ width: size, height: size, left: (ring - size) / 2, top: (ring - size) / 2 }}>
           <AvatarRenderer nickname={player.nickname} avatar={player.avatar} size={size} framing="bust" mood={mood} animated />
         </div>
 
         {/* Etiquetas de estado */}
-        {standing && (
+        {away && !eliminated && (
+          <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap px-1.5 rounded-pill bg-noir-700 text-gold-400
+                           text-[9px] font-sans font-medium tracking-wider border border-gold-600/50 animate-pulse z-[1]">
+            VOLVIENDO…
+          </span>
+        )}
+        {standing && !away && (
           <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 whitespace-nowrap px-1.5 rounded-pill bg-stand text-stand-text
                            text-[9px] font-sans font-medium tracking-wider border border-black/40">
             SE PLANTÓ

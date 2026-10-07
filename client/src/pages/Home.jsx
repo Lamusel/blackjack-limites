@@ -5,6 +5,7 @@ import { useGame } from '@/hooks/useGame'
 import { useAudio } from '@/hooks/useAudio'
 import AvatarRenderer from '@/components/avatar/AvatarRenderer'
 import SettingsButton from '@/components/ui/SettingsButton'
+import { avatarFor, savedNicknames } from '@/lib/session'
 
 export default function Home() {
   const navigate = useNavigate()
@@ -12,14 +13,33 @@ export default function Home() {
   const { state, dispatch }  = useGame()
   const [nick, setNick] = useState(state.nickname || '')
   const [needNick, setNeedNick] = useState(false)
+  const [showSaved, setShowSaved] = useState(false)
+
+  // Cada nombre es un jugador distinto (su propio avatar y sus estadísticas)
+  const typed = nick.trim()
+  const previewAvatar = typed.toLowerCase() === (state.nickname || '').toLowerCase() ? state.avatar : avatarFor(typed)
+  const others = savedNicknames().filter(n => n !== typed.toLowerCase())
 
   // Arranca la música de fondo (o la deja sonando si ya venía de otra página)
   useAudio()
 
-  const saveNick = () => {
-    const trimmed = nick.trim()
-    if (trimmed) dispatch({ type: 'SET_PLAYER_INFO', payload: { nickname: trimmed } })
+  const saveNick = (value = nick) => {
+    const trimmed = String(value).trim()
+    if (trimmed && trimmed !== state.nickname) dispatch({ type: 'SET_PLAYER_INFO', payload: { nickname: trimmed } })
     return trimmed
+  }
+
+  const pickSaved = (name) => {
+    setNick(name)
+    saveNick(name)
+    setShowSaved(false)
+    setNeedNick(false)
+  }
+
+  const newPlayer = () => {
+    setNick('')
+    dispatch({ type: 'SET_PLAYER_INFO', payload: { nickname: '', avatar: null, profileId: null } })
+    setShowSaved(false)
   }
 
   // Para entrar a salas hace falta nombre
@@ -64,11 +84,11 @@ export default function Home() {
         {/* Personaje + nombre */}
         <div className="w-full card-noir p-4">
           <div className="flex items-center gap-4">
-            <button onClick={() => go('/avatar', false)} aria-label="Personalizar avatar"
+            <button onClick={() => go('/avatar')} aria-label="Personalizar avatar"
               className="relative flex-shrink-0 group">
               <div className="rounded-full p-[3px] bg-gradient-to-b from-gold-400 to-gold-600 shadow-glow-gold">
                 <div className="rounded-full overflow-hidden" style={{ width: 76, height: 76 }}>
-                  <AvatarRenderer nickname={nick || 'Jugador'} avatar={state.avatar} size={76} />
+                  <AvatarRenderer nickname={typed || 'Jugador'} avatar={previewAvatar} size={76} />
                 </div>
               </div>
               <span className="absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-noir-900 border border-gold-500
@@ -91,18 +111,44 @@ export default function Home() {
                            ${needNick ? 'border-lose-text' : 'border-noir-600'}`}
               />
               <p className={`text-xs mt-1 font-sans ${needNick ? 'text-lose-text' : 'text-warm-600'}`}>
-                {needNick ? 'Escribe un nombre para entrar a la mesa' : 'Toca tu retrato para vestir a tu personaje'}
+                {needNick ? 'Primero escribe tu nombre' : 'Cada nombre tiene su personaje y sus estadísticas'}
               </p>
+              <div className="flex items-center gap-3 mt-1">
+                {others.length > 0 && (
+                  <button onClick={() => setShowSaved(v => !v)} className="text-[11px] font-sans text-gold-500 hover:text-gold-400">
+                    ⇄ Cambiar de jugador
+                  </button>
+                )}
+                {typed && (
+                  <button onClick={newPlayer} className="text-[11px] font-sans text-warm-600 hover:text-gold-400">
+                    + Nuevo
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
+          {showSaved && others.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1.5 animate-fade-in">
+              {others.map(n => (
+                <button key={n} onClick={() => pickSaved(n)}
+                  className="flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-pill border border-noir-600 bg-noir-800 hover:border-gold-600">
+                  <span className="rounded-full overflow-hidden" style={{ width: 22, height: 22 }}>
+                    <AvatarRenderer nickname={n} avatar={avatarFor(n)} size={22} />
+                  </span>
+                  <span className="text-xs font-sans text-cream">{n}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2 mt-4">
-            <button onClick={() => go('/avatar', false)}
+            <button onClick={() => go('/avatar')}
               className="h-10 rounded-btn border border-noir-500 text-warm-400 hover:border-gold-600 hover:text-gold-400
                          font-sans text-sm transition-colors">
               🎩 Personaje
             </button>
-            <button onClick={() => go('/profile', false)}
+            <button onClick={() => go('/profile')}
               className="h-10 rounded-btn border border-noir-500 text-warm-400 hover:border-gold-600 hover:text-gold-400
                          font-sans text-sm transition-colors">
               📊 Mi perfil
@@ -112,10 +158,10 @@ export default function Home() {
 
         {/* Dificultades */}
         <div className="flex gap-2 flex-wrap justify-center">
-          <span className="badge-difficulty badge-easy">🟢 +2</span>
-          <span className="badge-difficulty badge-medium">🔵 +4</span>
-          <span className="badge-difficulty badge-hard">🟠 +6</span>
-          <span className="badge-difficulty badge-advanced">🔴 +8</span>
+          <span className="badge-difficulty badge-easy">🟢 2–3</span>
+          <span className="badge-difficulty badge-medium">🔵 4–5</span>
+          <span className="badge-difficulty badge-hard">🟠 6–7</span>
+          <span className="badge-difficulty badge-advanced">🔴 8–9</span>
         </div>
 
         {/* Botones */}
